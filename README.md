@@ -2,12 +2,11 @@
 
 ## Neden bu servis var
 
-Bu, portföydeki eski (3 yıllık, kaynakları artık ayakta olmayan) bootcamp
-projelerinden biri değil — özellikle bu senaryo için yazılmış, küçük ama
-**gerçekten çalışan** bir servis: kendi SQLite veritabanı, gerçek CRUD
+
+bu senaryo için yazılmış, küçük ama
+** çalışan** bir servis: kendi SQLite veritabanı, gerçek CRUD
 mantığı, 7 testi ve gerçek Prometheus metrikleri (`/metrics`) var. Amaç,
-CI/CD + canary + rollback mimarisini "sahte bir deploy tiyatrosu" değil,
-gerçek trafik/gerçek metrik üzerinden göstermek.
+CI/CD + canary + rollback mimarisini gerçek trafik/gerçek metrik üzerinden göstermek.
 
 ## Mevcut durum
 
@@ -18,16 +17,14 @@ gerçek trafik/gerçek metrik üzerinden göstermek.
 - [x] Argo Rollouts controller kurulu
 - [x] Prometheus kurulu (kube-prometheus-stack, Grafana kapalı — bkz. aşağı)
 - [ ] Bu servisin ilk deploy'u — **Adım 3**
-- [ ] ServiceMonitor + gerçek bir canary rollout — **Adım 4-5**
+- [ ] ServiceMonitor +  bir canary rollout — **Adım 4-5**
 - [ ] Kasıtlı kötü sürümle rollback kanıtı — **Adım 6**
 
 ---
 
 ## Yol boyunca çıkan gerçek bulgular (bu da senaryonun bir parçası)
 
-Bu bölümü bilinçli olarak sildirmedik — bir portföyde "her şey ilk seferde
-sorunsuz çalıştı" demek, gerçek saha deneyiminden çok bir tutorial'a
-benziyor. Aşağıdakiler gerçekten karşılaştığımız ve çözdüğümüz sorunlar:
+Aşağıdakiler gerçekten karşılaştığımız ve çözdüğümüz sorunlar:
 
 **1. Argo Rollouts CRD'leri `kubectl apply` ile kurulamadı**
 `analysistemplates.argoproj.io` CRD'si çok büyük olduğu için
@@ -54,11 +51,8 @@ kendi taban yükü, node kapasitesinin büyük kısmını yapısal olarak
 kaplıyordu.**
 
 **4. Çözüm: `e2-micro` → `e2-small`**
-GCP hesabının "Always Free" değil, **90 günlük/€264'lük bir deneme (Free
-Trial) kredisi** olduğunu fark ettik (Billing → Overview'da görünüyor).
-Bu, tek bir `e2-micro`'ya sıkışıp BestEffort/no-resource-request gibi
-kırılgan workaround'larla uğraşmaktansa, node pool'u gerçekçi bir boyuta
-(`e2-small`, 2 vCPU/2GB) büyütmeyi bu kredi kapsamında anlamlı kıldı:
+
+Node pool'u (`e2-small`, 2 vCPU/2GB) büyütuldu:
 
 ```bash
 gcloud container node-pools create larger-pool \
@@ -76,22 +70,7 @@ Sonrasında memory kullanımı %99'dan %54'e düştü — `task-tracker-api`
 pod'larına normal `resources.requests/limits` ile (bkz. `k8s/rollout.yaml`)
 rahatça yer var.
 
-> **Dikkat:** Bu kredi 3 Ocak 2027'de bitiyor. O tarihten önce ya cluster'ı
-> `terraform destroy`/`gcloud container clusters delete` ile kapat, ya da
-> gerçek ücretlendirmeye geçmek istemiyorsan node pool'u tekrar
-> `e2-micro`'ya küçült.
-
-**5. Google Managed Service for Prometheus (GMP) bileşenleri aylardır
-`Pending`**
-Cluster'da `gmp-system` namespace'inde GKE'nin varsayılan kurduğu bir GMP
-collector zaten vardı, ama `gmp-operator`/`rule-evaluator`/`alertmanager`
-pod'ları (rule/alerting kısmı) kaynak yetersizliğinden 4+ saattir hiç
-schedule olamamıştı — bizim bu oturumda bozduğumuz bir şey değildi. Bunu
-düzeltmeye uğraşmak yerine, kendi `kube-prometheus-stack`'imizi kurmayı
-tercih ettik (artık `e2-small`'da rahatça sığıyor); GMP'nin rule/alerting
-kısmıyla hiç uğraşmadık çünkü ihtiyacımız yoktu.
-
-**6. Grafana `CrashLoopBackOff`**
+> **5. Grafana `CrashLoopBackOff`**
 `kube-prometheus-stack` içindeki Grafana sürekli çöktü. AnalysisTemplate'imiz
 zaten Prometheus'u doğrudan PromQL ile sorguluyor — Grafana sadece görsel
 dashboard için, bu senaryoda zorunlu değil. Debug etmek yerine kapattık:
@@ -167,7 +146,7 @@ Status → Targets'tan `task-tracker-api` hedefinin `UP` olduğunu ve
 gerçek `job` label değerini kontrol et — `k8s/analysis-template.yaml`
 içindeki `job="task-tracker-api"` değeriyle eşleşmiyorsa orada düzelt.
 
-## Adım 6 — gerçek bir canary rollout tetikle
+## Adım 6 — canary rollout tetikle
 
 ```bash
 curl http://<task-tracker-api-service-ip>/tasks -X POST -d '{"title":"demo"}' -H "Content-Type: application/json"
@@ -197,5 +176,3 @@ push et; AnalysisTemplate'in bunu yakalayıp rollout'u durdurduğunu
   bir trafik yönlendirme katmanı yok, bu yüzden Argo Rollouts "basic canary"
   modunda (replica oranına dayalı ağırlıklandırma) çalışıyor — gerçek
   weighted traffic splitting değil ama dürüst ve doğru bir kurulum.
-- **€264 deneme kredisi 3 Ocak 2027'de bitiyor**: Bu tarihten önce cluster'ı
-  kapatmayı veya node pool'u küçültmeyi unutma.
