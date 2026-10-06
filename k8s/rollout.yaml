@@ -54,7 +54,6 @@ spec:
         # emptyDir on purpose: a single-node free-tier cluster has no
         # ReadWriteMany storage class, and canary creates two ReplicaSets
         # at once. Data is not shared/persisted across pods or rollouts —
-        # fine for demonstrating the deploy pipeline, not for real storage.
         - name: data
           emptyDir: {}
   strategy:
