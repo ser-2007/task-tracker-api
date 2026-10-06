@@ -2,12 +2,11 @@
 
 ## Neden bu servis var
 
-Bu, portföydeki eski (3 yıllık, kaynakları artık ayakta olmayan) bootcamp
-projelerinden biri değil — özellikle bu senaryo için yazılmış, küçük ama
-**gerçekten çalışan** bir servis: kendi SQLite veritabanı, gerçek CRUD
+
+bu senaryo için yazılmış, küçük ama
+** çalışan** bir servis: kendi SQLite veritabanı, gerçek CRUD
 mantığı, 7 testi ve gerçek Prometheus metrikleri (`/metrics`) var. Amaç,
-CI/CD + canary + rollback mimarisini "sahte bir deploy tiyatrosu" değil,
-gerçek trafik/gerçek metrik üzerinden göstermek.
+CI/CD + canary + rollback mimarisini gerçek trafik/gerçek metrik üzerinden göstermek.
 
 ## Mevcut durum
 
@@ -18,16 +17,14 @@ gerçek trafik/gerçek metrik üzerinden göstermek.
 - [X] Argo Rollouts controller kurulu
 - [X] Prometheus kurulu (kube-prometheus-stack, Grafana kapalı — bkz. aşağı)
 - [ ] Bu servisin ilk deploy'u — **Adım 3**
-- [ ] ServiceMonitor + gerçek bir canary rollout — **Adım 4-5**
+- [ ] ServiceMonitor +  bir canary rollout — **Adım 4-5**
 - [ ] Kasıtlı kötü sürümle rollback kanıtı — **Adım 6**
 
 ---
 
 ## Yol boyunca çıkan gerçek bulgular (bu da senaryonun bir parçası)
 
-Bu bölümü bilinçli olarak sildirmedik — bir portföyde "her şey ilk seferde
-sorunsuz çalıştı" demek, gerçek saha deneyiminden çok bir tutorial'a
-benziyor. Aşağıdakiler gerçekten karşılaştığımız ve çözdüğümüz sorunlar:
+Aşağıdakiler gerçekten karşılaştığımız ve çözdüğümüz sorunlar:
 
 **1. Argo Rollouts CRD'leri `kubectl apply` ile kurulamadı**
 `analysistemplates.argoproj.io` CRD'si çok büyük olduğu için
@@ -54,11 +51,8 @@ kendi taban yükü, node kapasitesinin büyük kısmını yapısal olarak
 kaplıyordu.**
 
 **4. Çözüm: `e2-micro` → `e2-small`**
-GCP hesabının "Always Free" değil, **90 günlük/€264'lük bir deneme (Free
-Trial) kredisi** olduğunu fark ettik (Billing → Overview'da görünüyor).
-Bu, tek bir `e2-micro`'ya sıkışıp BestEffort/no-resource-request gibi
-kırılgan workaround'larla uğraşmaktansa, node pool'u gerçekçi bir boyuta
-(`e2-small`, 2 vCPU/2GB) büyütmeyi bu kredi kapsamında anlamlı kıldı:
+
+Node pool'u (`e2-small`, 2 vCPU/2GB) büyütuldu:
 
 ```bash
 gcloud container node-pools create larger-pool \
@@ -165,7 +159,7 @@ Status → Targets'tan `task-tracker-api` hedefinin `UP` olduğunu ve
 gerçek `job` label değerini kontrol et — `k8s/analysis-template.yaml`
 içindeki `job="task-tracker-api"` değeriyle eşleşmiyorsa orada düzelt.
 
-## Adım 6 — gerçek bir canary rollout tetikle
+## Adım 6 — canary rollout tetikle
 
 ```bash
 curl http://<task-tracker-api-service-ip>/tasks -X POST -d '{"title":"demo"}' -H "Content-Type: application/json"
