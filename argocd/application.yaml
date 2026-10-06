@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: task-tracker-api
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # Point this at the repo/path where the CI pipeline commits the
+    # image-tag-bumped manifests (see .github/workflows/ci-cd.yml).
+    # Using the same repo's k8s/ folder is fine for a single-cluster demo.
+    repoURL: https://github.com/ser-2007/task-tracker-api.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    # Automated + selfHeal: fine for a single-environment portfolio demo.
+    # In the multi-env setup (Scenario 1 pattern) prod would omit this
+    # block and require manual `argocd app sync`.
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

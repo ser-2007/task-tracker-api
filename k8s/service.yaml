@@ -1,0 +1,20 @@
+# Single plain Service — no service mesh/ingress controller (Istio, NGINX,
+# ALB) is in this cluster, so we use Argo Rollouts' "basic canary" mode:
+# no trafficRouting block in the Rollout means canary weight is approximated
+# by the ratio of stable vs. canary pod replicas, and both sets of pods sit
+# behind this one Service. That's the honest, free-tier-accurate setup —
+# true weighted traffic splitting would need a mesh/ingress we don't have.
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-tracker-api
+  labels:
+    app: task-tracker-api
+spec:
+  selector:
+    app: task-tracker-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

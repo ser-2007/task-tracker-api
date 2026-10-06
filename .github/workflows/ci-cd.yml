@@ -1,0 +1,85 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    # Avoid re-triggering the whole pipeline when the bot-committed image
+    # tag bump (see update-manifest job) pushes back to main.
+    paths-ignore:
+      - "k8s/**"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: meta
+        run: echo "sha_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -t ${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.sha_tag }} .
+
+      # Trivy fails the build on CRITICAL/HIGH CVEs — same gate used in the
+      # Scenario 2 pipeline design, kept here so a vulnerable image never
+      # reaches the registry.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_tag }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: Push image
+        run: docker push ${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.sha_tag }}
+
+  update-manifest:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump image tag in Rollout manifest
+        run: |
+          sed -i "s|image: ${REGISTRY}/${IMAGE_NAME}:.*|image: ${REGISTRY}/${IMAGE_NAME}:${{ needs.build-and-push.outputs.image_tag }}|" k8s/rollout.yaml
+
+      - name: Commit and push manifest update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/rollout.yaml
+          git diff --cached --quiet || git commit -m "ci: bump image to ${{ needs.build-and-push.outputs.image_tag }}"
+          git push

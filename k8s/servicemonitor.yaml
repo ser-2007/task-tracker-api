@@ -1,0 +1,18 @@
+# Tells kube-prometheus-stack's Prometheus to scrape /metrics on this
+# service. Requires kube-prometheus-stack installed with its default
+# ServiceMonitor label selector (release=kube-prometheus-stack) — adjust
+# the label below if your Helm release uses a different selector.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: task-tracker-api
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: task-tracker-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

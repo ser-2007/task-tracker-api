@@ -1,0 +1,33 @@
+# Requires kube-prometheus-stack installed in the cluster (see README —
+# this is a shared prerequisite for Scenario 2's canary analysis AND
+# Scenario 3's OOMKilled alerting, so install it once, now.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate-and-latency
+spec:
+  metrics:
+    - name: success-rate
+      interval: 30s
+      count: 3
+      successCondition: result >= 0.95
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api",status=~"2.."}[1m]))
+            /
+            sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api"}[1m]))
+    - name: p95-latency-ms
+      interval: 30s
+      count: 3
+      successCondition: result <= 500
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            histogram_quantile(0.95,
+              sum(rate(flask_http_request_duration_seconds_bucket{job="task-tracker-api"}[1m])) by (le)
+            ) * 1000
