@@ -119,7 +119,22 @@ def complete_task(task_id):
     return jsonify(dict(row)), 200
 
 
-init_db()
+_db_initialized = False
+
+
+@app.before_request
+def _ensure_db_initialized():
+    # Lazy, one-time init instead of calling init_db() at import time.
+    # Import-time init_db() would try to create /data as soon as the
+    # module loads — including during test collection and CI, before
+    # anything has a chance to point DB_PATH at a writable location —
+    # which is exactly what broke the GitHub Actions run (PermissionError
+    # on /data under the CI runner's non-root user).
+    global _db_initialized
+    if not _db_initialized:
+        init_db()
+        _db_initialized = True
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)

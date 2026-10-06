@@ -11,12 +11,12 @@ gerçek trafik/gerçek metrik üzerinden göstermek.
 
 ## Mevcut durum
 
-- [x] GKE cluster (`devops-portfolio`, `us-central1-a`)
-- [x] Node pool `e2-micro` → `e2-small`'a büyütüldü (bkz. "Yol boyunca
-      çıkan gerçek bulgular")
-- [x] ArgoCD kurulu
-- [x] Argo Rollouts controller kurulu
-- [x] Prometheus kurulu (kube-prometheus-stack, Grafana kapalı — bkz. aşağı)
+- [X] GKE cluster (`devops-portfolio`, `us-central1-a`)
+- [X] Node pool `e2-micro` → `e2-small`'a büyütüldü (bkz. "Yol boyunca
+  çıkan gerçek bulgular")
+- [X] ArgoCD kurulu
+- [X] Argo Rollouts controller kurulu
+- [X] Prometheus kurulu (kube-prometheus-stack, Grafana kapalı — bkz. aşağı)
 - [ ] Bu servisin ilk deploy'u — **Adım 3**
 - [ ] ServiceMonitor + gerçek bir canary rollout — **Adım 4-5**
 - [ ] Kasıtlı kötü sürümle rollback kanıtı — **Adım 6**
@@ -76,11 +76,6 @@ Sonrasında memory kullanımı %99'dan %54'e düştü — `task-tracker-api`
 pod'larına normal `resources.requests/limits` ile (bkz. `k8s/rollout.yaml`)
 rahatça yer var.
 
-> **Dikkat:** Bu kredi 3 Ocak 2027'de bitiyor. O tarihten önce ya cluster'ı
-> `terraform destroy`/`gcloud container clusters delete` ile kapat, ya da
-> gerçek ücretlendirmeye geçmek istemiyorsan node pool'u tekrar
-> `e2-micro`'ya küçült.
-
 **5. Google Managed Service for Prometheus (GMP) bileşenleri aylardır
 `Pending`**
 Cluster'da `gmp-system` namespace'inde GKE'nin varsayılan kurduğu bir GMP
@@ -95,6 +90,7 @@ kısmıyla hiç uğraşmadık çünkü ihtiyacımız yoktu.
 `kube-prometheus-stack` içindeki Grafana sürekli çöktü. AnalysisTemplate'imiz
 zaten Prometheus'u doğrudan PromQL ile sorguluyor — Grafana sadece görsel
 dashboard için, bu senaryoda zorunlu değil. Debug etmek yerine kapattık:
+
 ```bash
 helm upgrade kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace monitoring --reuse-values --set grafana.enabled=false
@@ -111,6 +107,7 @@ kubectl get pods -n argo-rollouts   # Running olmalı
 ```
 
 Kubectl plugin'i de kur (rollout durumunu izlemek için):
+
 ```bash
 curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
 chmod +x kubectl-argo-rollouts-linux-amd64
@@ -131,6 +128,7 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
 ```
 
 Doğrulama:
+
 ```bash
 kubectl get pods -n monitoring
 ```
@@ -190,12 +188,7 @@ push et; AnalysisTemplate'in bunu yakalayıp rollout'u durdurduğunu
 ## Notlar / bilinçli sınırlamalar
 
 - **SQLite + emptyDir**: Veriler pod yeniden başladığında / canary pod'ları
-  arasında paylaşılmaz. Bu demo için kabul edilebilir (gerçek bir ürün
-  pipeline'ında Cloud SQL/Postgres kullanılırdı); amaç veri kalıcılığı değil,
-  deploy pipeline'ının kendisi.
+  arasında paylaşılmaz.
 - **Basic canary (trafficRouting yok)**: Cluster'da Istio/NGINX Ingress gibi
   bir trafik yönlendirme katmanı yok, bu yüzden Argo Rollouts "basic canary"
-  modunda (replica oranına dayalı ağırlıklandırma) çalışıyor — gerçek
-  weighted traffic splitting değil ama dürüst ve doğru bir kurulum.
-- **€264 deneme kredisi 3 Ocak 2027'de bitiyor**: Bu tarihten önce cluster'ı
-  kapatmayı veya node pool'u küçültmeyi unutma.
+  modunda (replica oranına dayalı ağırlıklandırma) çalışıyor —
