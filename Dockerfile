@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+# Pick up OS-level security patches (e.g. libpcre2 CVE-2026-103111) that
+# land after the base image was built. Found by the CI pipeline's Trivy
+# scan actually blocking a real fixable HIGH CVE — see README.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements.txt .
