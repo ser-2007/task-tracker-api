@@ -15,10 +15,18 @@ spec:
       provider:
         prometheus:
           address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+          # Wrapped in scalar(...): Argo Rollouts' Prometheus provider parses
+          # a bare instant-vector result as []float64 even with exactly one
+          # series, and then `result >= 0.95` fails with "invalid operation:
+          # >= (mismatched types []float64 and float64)". scalar() forces a
+          # true single float64. Found by a real rollout aborting on this
+          # exact error — see README.
           query: |
-            sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api",status=~"2.."}[1m]))
-            /
-            sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api"}[1m]))
+            scalar(
+              sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api",status=~"2.."}[1m]))
+              /
+              sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api"}[1m]))
+            )
     - name: p95-latency-ms
       interval: 30s
       count: 3
@@ -28,6 +36,8 @@ spec:
         prometheus:
           address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
           query: |
-            histogram_quantile(0.95,
-              sum(rate(flask_http_request_duration_seconds_bucket{job="task-tracker-api"}[1m])) by (le)
-            ) * 1000
+            scalar(
+              histogram_quantile(0.95,
+                sum(rate(flask_http_request_duration_seconds_bucket{job="task-tracker-api"}[1m])) by (le)
+              ) * 1000
+            )
