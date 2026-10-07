@@ -143,7 +143,7 @@ kept serving 100% of traffic throughout, with zero manual intervention:
 
 ```
 NAME                                       KIND         STATUS      AGE    INFO
-⟳ task-tracker-api                         Rollout      ✖ Degraded  30h
+⟳ task-tracker-api                         Rollout      ✖ Degraded  31h
 ├──# revision:8
 │  └──⧉ task-tracker-api-c85f79949         ReplicaSet   • ScaledDown  canary
 │     └──α task-tracker-api-c85f79949-8-2  AnalysisRun  ✖ Failed    ✓ 2, ✗ 2
@@ -151,6 +151,15 @@ NAME                                       KIND         STATUS      AGE    INFO
    └──⧉ task-tracker-api-598cc795bb        ReplicaSet   ✔ Healthy   stable
       ├──□ ...-czdpj                       Pod          ✔ Running   ready:1/1
       └──□ ...-qmn8z                       Pod          ✔ Running   ready:1/1
+```
+
+Argo Rollouts' own message confirms why it stopped:
+
+```
+Status:  Degraded
+Message: RolloutAborted: Rollout aborted update to revision 8:
+         Step-based analysis phase error/failed: Metric "success-rate"
+         assessed Failed due to failed (2) > failureLimit (1)
 ```
 
 The broken revision was then reverted and removed from the deployment
