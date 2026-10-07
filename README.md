@@ -4,7 +4,7 @@
 A small Flask CRUD service deployed to GKE through a full GitOps pipeline:
 GitHub Actions builds and scans the image, ArgoCD syncs the manifests, and
 Argo Rollouts drives a metrics-gated canary release backed by live
-Prometheus queries.
+Prometheus queries scoped to the canary pods themselves.
 
 ## Architecture
 
@@ -13,8 +13,9 @@ developer push → GitHub Actions (test → build → Trivy scan → push to GHC
                 → bump image tag in k8s/rollout.yaml, commit back to main
                 → ArgoCD detects drift, syncs k8s/ to the cluster
                 → Argo Rollouts runs a canary release:
-                    25% traffic → pause → AnalysisRun (Prometheus query
-                    gate on success rate + p95 latency) → 50% → pause → 100%
+                    25% traffic → pause → AnalysisRun (Prometheus query,
+                    scoped to the canary's own pods, gated on success rate
+                    + p95 latency) → 50% → pause → 100%
 ```
 
 **Stack:** Flask + SQLite, `prometheus-flask-exporter`, Docker, GitHub
@@ -82,7 +83,7 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
 
 Grafana is disabled: the AnalysisTemplate queries Prometheus directly over
 PromQL, so a dashboard UI isn't required for this pipeline, and the
-bundled Grafana pod was unstable on the cluster's node sizing.
+bundled Grafana pod was unstable on the cluster's initial node sizing.
 
 ### 3. Image registry and CI/CD
 
@@ -127,15 +128,35 @@ kubectl argo rollouts get rollout task-tracker-api --watch
 
 A push to `main` that changes the app triggers CI/CD, which updates the
 image tag, which ArgoCD syncs, which starts the canary. Steps: `25%` →
-60s pause → AnalysisRun (Prometheus-gated) → `50%` → 60s pause → `100%`.
+60s pause → AnalysisRun (Prometheus-gated, scoped to the canary pods) →
+`50%` → 60s pause → `100%`.
 
 ![Rollout completed: Healthy, AnalysisRun Successful](docs/images/rollout-healthy-final.png)
 
-### 7. Rollback proof (next)
+### 7. Rollback proof
 
-Ship a deliberately broken version (artificial latency or error rate in
-`/health`) and confirm the AnalysisTemplate catches it, aborting the
-rollout and returning all traffic to the stable revision automatically.
+A deliberately broken revision (`FAULT_RATE` env var, injecting a ~50%
+error rate into `/health`) was shipped to the canary. The AnalysisTemplate
+correctly measured the canary's degraded success rate, failed the gate,
+and Argo Rollouts aborted the rollout automatically — the stable revision
+kept serving 100% of traffic throughout, with zero manual intervention:
+
+```
+NAME                                       KIND         STATUS      AGE    INFO
+⟳ task-tracker-api                         Rollout      ✖ Degraded  30h
+├──# revision:8
+│  └──⧉ task-tracker-api-c85f79949         ReplicaSet   • ScaledDown  canary
+│     └──α task-tracker-api-c85f79949-8-2  AnalysisRun  ✖ Failed    ✓ 2, ✗ 2
+└──# revision:7
+   └──⧉ task-tracker-api-598cc795bb        ReplicaSet   ✔ Healthy   stable
+      ├──□ ...-czdpj                       Pod          ✔ Running   ready:1/1
+      └──□ ...-qmn8z                       Pod          ✔ Running   ready:1/1
+```
+
+The broken revision was then reverted and removed from the deployment
+history.
+
+---
 
 ## Operational notes
 
@@ -146,45 +167,46 @@ working incident log rather than a sanitized happy path.
 CRDs with a 262144-byte annotation limit. Fixed with
 `kubectl apply --server-side`.
 
-**Node capacity, round one.** On the initial `e2-micro` node, mandatory
-GKE system add-ons (`kube-dns`, `gke-metrics-agent`, `kube-state-metrics`,
-CSI drivers) alone consumed ~99% of allocatable memory before any
-application workload was scheduled. Disabling individual add-ons (e.g.
-Cloud Logging) didn't help — GKE's reconciler backfilled the freed
-capacity with another managed component within seconds. Resolved by
-resizing the node pool to `e2-small`, which dropped memory pressure to
-~54%:
+**Initial node capacity was insufficient for any real workload.** On the
+smallest available node size, mandatory GKE system add-ons (`kube-dns`,
+`gke-metrics-agent`, `kube-state-metrics`, CSI drivers) alone consumed
+~99% of allocatable memory before any application workload was scheduled.
+Disabling individual add-ons (e.g. Cloud Logging) didn't help — GKE's
+reconciler backfilled the freed capacity with another managed component
+within seconds. Resolved by sizing the node pool for the actual workload
+(ArgoCD + Argo Rollouts + kube-prometheus-stack + the application), which
+also required a second resize once all of those were running together
+and the first upsize still left CPU requests at ~97% — confirmed via
+`kubectl describe node`'s Allocated Resources before resizing again. The
+node pool migration pattern used both times:
 
 ```bash
-gcloud container node-pools create larger-pool \
+gcloud container node-pools create <new-pool-name> \
   --cluster devops-portfolio --zone us-central1-a \
-  --machine-type e2-small --num-nodes 1
+  --machine-type <size> --num-nodes <n>
 kubectl cordon <old-node-name>
 kubectl drain <old-node-name> --ignore-daemonsets --delete-emptydir-data
-gcloud container node-pools delete default-pool \
+gcloud container node-pools delete <old-pool-name> \
   --cluster devops-portfolio --zone us-central1-a
 ```
 
-**Node capacity, round two.** As ArgoCD, Argo Rollouts, kube-prometheus-stack,
-and the application accumulated on a single `e2-small` node, memory
-requests climbed to 97% and CPU to 79%. This manifested as
-`kubectl port-forward` failing with `error dialing backend: No agent available` — the `konnectivity-agent` (GKE's control-plane↔node tunnel)
-was in `CrashLoopBackOff`, and even `kubectl logs` on it failed, since
+**Resource saturation manifested as a broken control-plane tunnel, not an
+obvious OOM.** Once ArgoCD, Argo Rollouts, kube-prometheus-stack, and the
+application were all scheduled on one node, `kubectl port-forward` started
+failing with `error dialing backend: No agent available`. The
+`konnectivity-agent` (GKE's control-plane↔node tunnel) was in
+`CrashLoopBackOff`, and `kubectl logs` against it failed too, since
 fetching logs depends on the same broken tunnel. Diagnosed via direct node
 SSH + `crictl` (bypassing the API server tunnel entirely), which surfaced
 the real cause: `containerd` itself was timing out on CRI calls
-(`DeadlineExceeded`) under resource pressure. Resolved by upgrading to
-`e2-medium` and, when that still saturated CPU under the combined
-workload, resizing the pool to 2 nodes:
-
-```bash
-gcloud container clusters resize devops-portfolio \
-  --node-pool medium-pool --num-nodes 2 --zone us-central1-a
-```
+(`DeadlineExceeded`) under memory/CPU pressure. Confirmed and resolved by
+resizing the node pool and splitting it across two nodes rather than one,
+which also removed a single-node point of failure ahead of load testing
+in later scenarios.
 
 **AnalysisTemplate type mismatch aborted the first real rollout.** The
 first live canary run failed with
-`invalid operation: >= (mismatched types []float64 and float64)` and Argo
+`invalid operation: >= (mismatched types []float64 and float64)`, and Argo
 Rollouts correctly aborted the rollout, returning all traffic to stable
 with zero user-facing impact. Root cause: Argo Rollouts' Prometheus
 provider can parse an instant-vector result as `[]float64` even with a
@@ -192,14 +214,51 @@ single series, which then fails type comparison against a scalar
 `successCondition`. Fixed by wrapping both PromQL queries in `scalar(...)`.
 
 **`retry` does not re-resolve an updated AnalysisTemplate.** After fixing
-the template, retrying the same rollout (`kubectl argo rollouts retry`)
-reproduced the identical, pre-fix error three times in a row. Argo
-Rollouts resolves and freezes the AnalysisTemplate content the first time
-a canary step's analysis phase starts; `retry` replays that frozen copy
-rather than re-reading the template. The fix only took effect once a new
-revision was shipped (a fresh code change, committed and pushed), which
-triggered a new analysis resolution — confirmed by `Successful` with 6/6
-measurements passing.
+the template above, retrying the same rollout (`kubectl argo rollouts retry`) reproduced the identical, pre-fix error three times in a row.
+Argo Rollouts resolves and freezes the AnalysisTemplate content the first
+time a canary step's analysis phase starts; `retry` replays that frozen
+copy rather than re-reading the template. The fix only took effect once a
+new revision was shipped (a fresh commit, triggering a new analysis
+resolution).
+
+**The success-rate query was diluted by the stable revision's healthy
+traffic, and a broken canary passed the gate.** The first fault-injection
+test (`FAULT_RATE=0.5` on the canary only) was expected to fail the
+success-rate gate, but the AnalysisRun passed with measured values around
+0.94–0.99. Root cause: the query filtered on `job="task-tracker-api"`
+only, which matches **both** the stable and canary ReplicaSets' pods —
+two fully healthy stable pods' request volume outweighed the one degraded
+canary pod's error rate badly enough that the aggregate stayed above the
+0.95 threshold, and the broken revision was wrongly promoted to stable.
+Fixed by passing the canary's pod-template-hash into the AnalysisTemplate
+as an argument and scoping both PromQL queries to the canary's own pods:
+
+```yaml
+# k8s/rollout.yaml — analysis step
+- analysis:
+    templates:
+      - templateName: success-rate-and-latency
+    args:
+      - name: canary-hash
+        valueFrom:
+          podTemplateHashValue: Latest
+```
+
+```yaml
+# k8s/analysis-template.yaml — query, scoped via pod name
+query: |
+  scalar(
+    sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api", pod=~".*-{{args.canary-hash}}-.*", status=~"2.."}[1m]))
+    /
+    sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api", pod=~".*-{{args.canary-hash}}-.*"}[1m]))
+  )
+```
+
+After this fix, a clean revision was promoted to stable first (to recover
+from the wrongly-promoted broken one), and the same fault-injection test
+was repeated: the AnalysisRun now correctly measured the canary's own
+degraded success rate and failed (`2 succeeded, 2 failed`), aborting the
+rollout and leaving stable untouched — see "Rollback proof" above.
 
 **Trivy found a real, fixable CVE.** With `ignore-unfixed: true` filtering
 out upstream-unfixed OS CVEs, one actionable finding remained:
@@ -216,4 +275,8 @@ the base image. Fixed in the `Dockerfile` with
   Istio/NGINX Ingress, so Argo Rollouts approximates canary weighting via
   replica ratio under a single Service rather than true weighted traffic
   splitting.
--
+- **Prometheus query scoping is pod-name-based**: the AnalysisTemplate
+  matches canary pods via `pod=~".*-{{args.canary-hash}}-.*"`, which works
+  because Kubernetes embeds the pod-template-hash in generated pod names.
+  A label-based match (if the metric exposed a pod-template-hash label
+  directly) would be more robust against naming changes.
