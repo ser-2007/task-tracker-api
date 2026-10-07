@@ -27,7 +27,9 @@ spec:
             - containerPort: 8080
           env:
             - name: APP_VERSION
-              value: "v2.1"
+              value: "v-bad"
+            - name: FAULT_RATE
+              value: "0.5"
           resources:
             requests:
               cpu: 50m

@@ -5,6 +5,7 @@ real: a SQLite-backed CRUD service with its own business logic, not a
 hello-world placeholder, so canary comparisons (v1 vs v2) are meaningful.
 """
 import os
+import random
 import sqlite3
 from datetime import datetime, timezone
 
@@ -56,6 +57,8 @@ def init_db():
 
 @app.route("/health")
 def health():
+    if FAULT_RATE and random.random() < FAULT_RATE:
+        return jsonify(status="error"), 500
     return jsonify(status="ok"), 200
 
 
