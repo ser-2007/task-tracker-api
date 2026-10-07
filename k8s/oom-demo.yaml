@@ -24,7 +24,7 @@ spec:
           # Pin to a known-good image tag (copy the current tag from
           # k8s/rollout.yaml) -- this manifest is intentionally NOT touched
           # by the CI/CD update-manifest job.
-          image: ghcr.io/ser-2007/task-tracker-api:61f2d27
+          image: ghcr.io/ser-2007/task-tracker-api:55c89c5
           ports:
             - containerPort: 8080
           env:
