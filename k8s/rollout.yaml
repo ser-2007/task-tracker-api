@@ -27,9 +27,9 @@ spec:
             - containerPort: 8080
           env:
             - name: APP_VERSION
-              value: "v-bad"
+              value: "v3-clean"
             - name: FAULT_RATE
-              value: "0.5"
+              value: "0"
           resources:
             requests:
               cpu: 50m
@@ -66,6 +66,10 @@ spec:
         - analysis:
             templates:
               - templateName: success-rate-and-latency
+            args:
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
         - setWeight: 50
         - pause: { duration: 60s }
         - setWeight: 100
