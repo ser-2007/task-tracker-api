@@ -22,7 +22,7 @@ spec:
       containers:
         - name: task-tracker-api
           # Replaced by the CI/CD pipeline: ghcr.io/<owner>/task-tracker-api:<sha>
-          image: ghcr.io/ser-2007/task-tracker-api:a546a01
+          image: ghcr.io/ser-2007/task-tracker-api:a285d89
           ports:
             - containerPort: 8080
           env:
