@@ -14,6 +14,11 @@ from prometheus_flask_exporter import PrometheusMetrics
 
 APP_VERSION = os.environ.get("APP_VERSION", "v2.1")
 
+# Fault injection, off by default (FAULT_RATE=0). Used once, deliberately,
+# to ship a broken canary and prove the AnalysisTemplate catches it and
+# Argo Rollouts aborts automatically -- see README "Rollback proof".
+FAULT_RATE = float(os.environ.get("FAULT_RATE", "0"))
+
 app = Flask(__name__)
 
 
