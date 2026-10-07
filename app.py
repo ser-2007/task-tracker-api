@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify, request, abort
 from prometheus_flask_exporter import PrometheusMetrics
 
-APP_VERSION = os.environ.get("APP_VERSION", "v2")
+APP_VERSION = os.environ.get("APP_VERSION", "v2.1")
 
 app = Flask(__name__)
 
