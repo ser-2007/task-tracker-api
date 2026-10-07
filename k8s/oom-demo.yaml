@@ -1,0 +1,66 @@
+# Isolated OOMKilled demo (Scenario 3). Deliberately separate from the
+# Argo Rollouts canary Rollout used in Scenario 2 -- this is a plain
+# Deployment with a tight memory limit and the /leak endpoint enabled,
+# so the experiment can never affect the production-style canary pipeline.
+# See docs/oomkilled-postmortem.md for the real incident this produced.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-tracker-api-oom-demo
+  labels:
+    app: task-tracker-api-oom-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: task-tracker-api-oom-demo
+  template:
+    metadata:
+      labels:
+        app: task-tracker-api-oom-demo
+    spec:
+      containers:
+        - name: task-tracker-api
+          # Pin to a known-good image tag (copy the current tag from
+          # k8s/rollout.yaml) -- this manifest is intentionally NOT touched
+          # by the CI/CD update-manifest job.
+          image: ghcr.io/ser-2007/task-tracker-api:61f2d27
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_VERSION
+              value: "oom-demo"
+            - name: ENABLE_LEAK_ENDPOINT
+              value: "true"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              # Deliberately tight: a handful of /leak calls will exceed
+              # this and trigger a real kernel OOM kill of the container.
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-tracker-api-oom-demo
+spec:
+  selector:
+    app: task-tracker-api-oom-demo
+  ports:
+    - port: 8080
+      targetPort: 8080

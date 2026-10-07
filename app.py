@@ -12,12 +12,19 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify, request, abort
 from prometheus_flask_exporter import PrometheusMetrics
 
-APP_VERSION = os.environ.get("APP_VERSION", "v2.1")
+APP_VERSION = os.environ.get("APP_VERSION", "v1")
 
 # Fault injection, off by default (FAULT_RATE=0). Used once, deliberately,
 # to ship a broken canary and prove the AnalysisTemplate catches it and
-# Argo Rollouts aborts automatically -- see README "Rollback proof".
+# Argo Rollouts aborts automatically — see README "Rollback proof".
 FAULT_RATE = float(os.environ.get("FAULT_RATE", "0"))
+
+# Memory-leak endpoint, off by default. Used once, deliberately, on a
+# separate low-memory-limit Deployment (k8s/oom-demo.yaml) to trigger and
+# document a real OOMKilled event — see docs/oomkilled-postmortem.md.
+# Never enabled on the main canary Rollout.
+LEAK_ENABLED = os.environ.get("ENABLE_LEAK_ENDPOINT", "false").lower() == "true"
+_leak_store = []
 
 app = Flask(__name__)
 
@@ -70,6 +77,21 @@ def health():
 @app.route("/version")
 def version():
     return jsonify(version=APP_VERSION), 200
+
+
+@app.route("/leak", methods=["POST"])
+def leak():
+    # Deliberately unbounded growth: each call appends a chunk that is
+    # never freed, to reproduce a real memory-leak-style OOMKill against a
+    # tight container memory limit. Disabled unless ENABLE_LEAK_ENDPOINT=true.
+    if not LEAK_ENABLED:
+        abort(404)
+    chunk_mb = int(request.args.get("mb", "10"))
+    _leak_store.append(bytearray(chunk_mb * 1024 * 1024))
+    return jsonify(
+        leaked_chunks=len(_leak_store),
+        approx_leaked_mb=len(_leak_store) * chunk_mb,
+    ), 200
 
 
 @app.route("/tasks", methods=["GET"])
