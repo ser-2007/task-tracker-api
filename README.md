@@ -1,114 +1,73 @@
-# Task Tracker API — GitOps CI/CD with Canary Rollout (Scenario 2)
 
-## Neden bu servis var
+# Task Tracker API — GitOps CI/CD with Canary Rollout
 
+A small Flask CRUD service deployed to GKE through a full GitOps pipeline:
+GitHub Actions builds and scans the image, ArgoCD syncs the manifests, and
+Argo Rollouts drives a metrics-gated canary release backed by live
+Prometheus queries.
 
-bu senaryo için yazılmış, küçük ama
-** çalışan** bir servis: kendi SQLite veritabanı, gerçek CRUD
-mantığı, 7 testi ve gerçek Prometheus metrikleri (`/metrics`) var. Amaç,
-CI/CD + canary + rollback mimarisini gerçek trafik/gerçek metrik üzerinden göstermek.
+## Architecture
 
-## Mevcut durum
-
-- [X] GKE cluster (`devops-portfolio`, `us-central1-a`)
-- [X] Node pool `e2-micro` → `e2-small`'a büyütüldü (bkz. "Yol boyunca
-  çıkan gerçek bulgular")
-- [X] ArgoCD kurulu
-- [X] Argo Rollouts controller kurulu
-- [X] Prometheus kurulu (kube-prometheus-stack, Grafana kapalı — bkz. aşağı)
-- [ ] Bu servisin ilk deploy'u — **Adım 3**
-- [ ] ServiceMonitor +  bir canary rollout — **Adım 4-5**
-- [ ] Kasıtlı kötü sürümle rollback kanıtı — **Adım 6**
-
----
-
-## Yol boyunca çıkan gerçek bulgular (bu da senaryonun bir parçası)
-
-Aşağıdakiler gerçekten karşılaştığımız ve çözdüğümüz sorunlar:
-
-**1. Argo Rollouts CRD'leri `kubectl apply` ile kurulamadı**
-`analysistemplates.argoproj.io` CRD'si çok büyük olduğu için
-`last-applied-configuration` annotation'ı 262144 byte sınırını aştı.
-Çözüm: `kubectl apply --server-side` kullanmak (annotation'a sığdırmaya
-çalışmadan doğrudan API server üzerinden uygular).
-
-**2. `e2-micro` node'da image pull'u ~8 dakika sürdü**
-İlk Argo Rollouts controller image'ı (`quay.io/argoproj/argo-rollouts`)
-node'a inmesi normalden çok uzun sürdü — `e2-micro`'nun paylaşımlı
-(burstable) CPU'su decompress/extract işlemini ciddi şekilde yavaşlattı.
-Hata değildi, sadece bu makine tipinin gerçek bir sınırlamasıydı.
-
-**3. `e2-micro`'nun allocatable memory'si, uygulama hiç deploy edilmeden
-%99 doluydu**
-Node sadece 622Mi allocatable memory'ye sahipti ve bunun neredeyse tamamı
-GKE'nin **zorunlu** sistem bileşenleri (`kube-dns`, `gke-metrics-agent`,
-`kube-state-metrics`, CSI driver, vs.) tarafından önceden request
-edilmişti. Cloud Logging addon'unu (`--logging=NONE`) kapatarak yer açmayı
-denedik; GKE'nin reconciler'ı boşalan yeri hemen başka bir yönetilen
-bileşenle doldurdu — toplam neredeyse değişmedi. Bu, addon'ları tek tek
-kapatarak çözülecek bir durum değildi: **tek bir `e2-micro` node'da GKE'nin
-kendi taban yükü, node kapasitesinin büyük kısmını yapısal olarak
-kaplıyordu.**
-
-**4. Çözüm: `e2-micro` → `e2-small`**
-
-Node pool'u (`e2-small`, 2 vCPU/2GB) büyütuldu:
-
-```bash
-gcloud container node-pools create larger-pool \
-  --cluster devops-portfolio --zone us-central1-a \
-  --machine-type e2-small --num-nodes 1
-
-kubectl cordon <eski-node-adi>
-kubectl drain <eski-node-adi> --ignore-daemonsets --delete-emptydir-data
-
-gcloud container node-pools delete default-pool \
-  --cluster devops-portfolio --zone us-central1-a
+```
+developer push → GitHub Actions (test → build → Trivy scan → push to GHCR)
+                → bump image tag in k8s/rollout.yaml, commit back to main
+                → ArgoCD detects drift, syncs k8s/ to the cluster
+                → Argo Rollouts runs a canary release:
+                    25% traffic → pause → AnalysisRun (Prometheus query
+                    gate on success rate + p95 latency) → 50% → pause → 100%
 ```
 
-Sonrasında memory kullanımı %99'dan %54'e düştü — `task-tracker-api`
-pod'larına normal `resources.requests/limits` ile (bkz. `k8s/rollout.yaml`)
-rahatça yer var.
+**Stack:** Flask + SQLite, `prometheus-flask-exporter`, Docker, GitHub
+Actions, Trivy, GHCR, GKE, ArgoCD, Argo Rollouts, kube-prometheus-stack.
 
-**5. Google Managed Service for Prometheus (GMP) bileşenleri aylardır
-`Pending`**
-Cluster'da `gmp-system` namespace'inde GKE'nin varsayılan kurduğu bir GMP
-collector zaten vardı, ama `gmp-operator`/`rule-evaluator`/`alertmanager`
-pod'ları (rule/alerting kısmı) kaynak yetersizliğinden 4+ saattir hiç
-schedule olamamıştı — bizim bu oturumda bozduğumuz bir şey değildi. Bunu
-düzeltmeye uğraşmak yerine, kendi `kube-prometheus-stack`'imizi kurmayı
-tercih ettik (artık `e2-small`'da rahatça sığıyor); GMP'nin rule/alerting
-kısmıyla hiç uğraşmadık çünkü ihtiyacımız yoktu.
+## Service
 
-**6. Grafana `CrashLoopBackOff`**
-`kube-prometheus-stack` içindeki Grafana sürekli çöktü. AnalysisTemplate'imiz
-zaten Prometheus'u doğrudan PromQL ile sorguluyor — Grafana sadece görsel
-dashboard için, bu senaryoda zorunlu değil. Debug etmek yerine kapattık:
+- `GET/POST /tasks`, `GET /tasks/<id>`, `POST /tasks/<id>/complete`,
+  `/health`, `/version`
+- SQLite-backed, 7 passing unit tests (`tests/test_app.py`)
+- `/metrics` exposes Prometheus counters and latency histograms per
+  endpoint/status — this is what the AnalysisTemplate queries during a
+  rollout, so the canary gate runs against real request data, not a stub
 
-```bash
-helm upgrade kube-prometheus-stack prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --reuse-values --set grafana.enabled=false
+## Repository layout
+
+```
+app.py                          Flask service
+tests/test_app.py               Unit tests
+Dockerfile
+.github/workflows/ci-cd.yml     CI/CD pipeline
+k8s/rollout.yaml                Argo Rollouts canary spec
+k8s/analysis-template.yaml      Prometheus-backed success-rate/latency gate
+k8s/servicemonitor.yaml         Prometheus scrape config
+argocd/application.yaml         ArgoCD Application (automated sync)
 ```
 
----
+## Setup
 
-## Adım 1 — Argo Rollouts controller'ı kur ✅ (tamamlandı)
+### 1. Argo Rollouts controller
 
 ```bash
 kubectl create namespace argo-rollouts
-kubectl apply -n argo-rollouts --server-side -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
-kubectl get pods -n argo-rollouts   # Running olmalı
+kubectl apply -n argo-rollouts --server-side \
+  -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+kubectl get pods -n argo-rollouts
 ```
 
-Kubectl plugin'i de kur (rollout durumunu izlemek için):
+The `analysistemplates.argoproj.io` CRD is large enough that a plain
+`kubectl apply` fails (`metadata.annotations: Too long: may not be more than 262144 bytes`, from the client-side `last-applied-configuration`
+annotation). `--server-side` applies directly against the API server and
+avoids the limit.
+
+Install the CLI plugin (macOS, Homebrew):
 
 ```bash
-curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
-chmod +x kubectl-argo-rollouts-linux-amd64
-sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+brew install argoproj/tap/kubectl-argo-rollouts
 ```
 
-## Adım 2 — Prometheus kur (Helm) ✅ (tamamlandı)
+A manually downloaded binary can mismatch the host architecture and fail
+with `exec format error`; Homebrew avoids that.
+
+### 2. Prometheus (kube-prometheus-stack)
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -121,68 +80,140 @@ helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.resources.limits.memory=512Mi
 ```
 
-Doğrulama:
+Grafana is disabled: the AnalysisTemplate queries Prometheus directly over
+PromQL, so a dashboard UI isn't required for this pipeline, and the
+bundled Grafana pod was unstable on the cluster's node sizing.
 
-```bash
-kubectl get pods -n monitoring
-```
+### 3. Image registry and CI/CD
 
-## Adım 3 — image'i gerçek registry'e (ghcr.io) bağla ⬅ **sıradaki adım**
+1. Push this repository to `ghcr.io`-backed GitHub Actions (Settings →
+   Actions → Workflow permissions → **Read and write permissions**, so CI
+   can push images and commit manifest updates back to `main`)
+2. Push to `main` and watch the Actions tab: `test` → `build-and-push`
+   (Docker build, Trivy scan, push to GHCR) → `update-manifest` (bumps the
+   image tag in `k8s/rollout.yaml` and commits it back)
 
-1. GitHub'da bu kod için yeni bir repo oluştur: `ser-2007/task-tracker-api`
-2. Bu klasörü o repoya push et
-3. Repo → Settings → Actions → General → Workflow permissions → **"Read and
-   write permissions"** seçili olsun (CI'nin ghcr.io'ya push edebilmesi ve
-   manifest commit'i atabilmesi için)
-4. Bu repodaki `k8s/rollout.yaml` içindeki image adını kendi GitHub
-   kullanıcı adınla eşleştiğinden emin ol (`ghcr.io/ser-2007/...` zaten
-   doğru, farklıysa güncelle)
-5. `main` branch'e push et → Actions sekmesinden pipeline'ı izle:
-   test → build → Trivy scan → ghcr.io'ya push → manifest'te image tag bump
+![CI/CD pipeline passing](docs/images/ci-cd-green.png)
 
-## Adım 4 — ArgoCD Application'ı oluştur
+### 4. ArgoCD Application
 
 ```bash
 kubectl apply -f argocd/application.yaml
-argocd app get task-tracker-api
-argocd app sync task-tracker-api   # automated sync açık, normalde otomatik senkronize olur
+kubectl get application task-tracker-api -n argocd
 ```
 
-## Adım 5 — ServiceMonitor'ü uygula ve job label'ını doğrula
+`syncPolicy.automated` (prune + selfHeal) keeps the cluster matched to
+`k8s/` without manual syncs.
+
+### 5. ServiceMonitor
 
 ```bash
 kubectl apply -f k8s/servicemonitor.yaml
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090
 ```
 
-Prometheus UI'da (`kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090`)
-Status → Targets'tan `task-tracker-api` hedefinin `UP` olduğunu ve
-gerçek `job` label değerini kontrol et — `k8s/analysis-template.yaml`
-içindeki `job="task-tracker-api"` değeriyle eşleşmiyorsa orada düzelt.
+Confirm the target is up and the `job` label matches what
+`k8s/analysis-template.yaml` queries:
 
-## Adım 6 — canary rollout tetikle
+![Prometheus target UP for task-tracker-api](docs/images/prometheus-target-up.png)
+
+![Live metric data from the deployed service](docs/images/prometheus-metric-query.png)
+
+### 6. Canary rollout
 
 ```bash
-curl http://<task-tracker-api-service-ip>/tasks -X POST -d '{"title":"demo"}' -H "Content-Type: application/json"
 kubectl argo rollouts get rollout task-tracker-api --watch
 ```
 
-Küçük bir kod değişikliği yapıp (ör. yeni bir endpoint ekle) push et,
-rollout'un 25% → analiz → 50% → 100% adımlarını gerçek metriklerle
-geçtiğini izle ve çıktıyı bu README'ye ekle.
+A push to `main` that changes the app triggers CI/CD, which updates the
+image tag, which ArgoCD syncs, which starts the canary. Steps: `25%` →
+60s pause → AnalysisRun (Prometheus-gated) → `50%` → 60s pause → `100%`.
 
-## Adım 7 — kasıtlı kötü bir sürüm ile rollback'i kanıtla
+![Rollout completed: Healthy, AnalysisRun Successful](docs/images/rollout-healthy-final.png)
 
-`app.py`'de `/health` endpoint'ine yapay bir gecikme veya hata oranı ekleyip
-push et; AnalysisTemplate'in bunu yakalayıp rollout'u durdurduğunu
-(`RolloutAborted`/`Degraded`) gerçek `kubectl argo rollouts get rollout`
-çıktısıyla belgele. Sonra değişikliği geri al.
+### 7. Rollback proof (next)
 
----
+Ship a deliberately broken version (artificial latency or error rate in
+`/health`) and confirm the AnalysisTemplate catches it, aborting the
+rollout and returning all traffic to the stable revision automatically.
 
-## Notlar / bilinçli sınırlamalar
+## Operational notes
 
-- **SQLite + emptyDir**: Veriler pod yeniden başladığında / canary pod'ları
-  arasında paylaşılmaz.
-- **Basic canary (trafficRouting yok)**: Cluster'da Istio/NGINX Ingress gibi
-  bir trafik yönlendirme katmanı yok, bu yüzden Argo Rollouts "basic canary"
-  modunda (replica oranına dayalı ağırlıklandırma) çalışıyor —
+Real issues hit and resolved while building this out, kept here as a
+working incident log rather than a sanitized happy path.
+
+**CRD size limit on install.** `kubectl apply` failed on the Argo Rollouts
+CRDs with a 262144-byte annotation limit. Fixed with
+`kubectl apply --server-side`.
+
+**Node capacity, round one.** On the initial `e2-micro` node, mandatory
+GKE system add-ons (`kube-dns`, `gke-metrics-agent`, `kube-state-metrics`,
+CSI drivers) alone consumed ~99% of allocatable memory before any
+application workload was scheduled. Disabling individual add-ons (e.g.
+Cloud Logging) didn't help — GKE's reconciler backfilled the freed
+capacity with another managed component within seconds. Resolved by
+resizing the node pool to `e2-small`, which dropped memory pressure to
+~54%:
+
+```bash
+gcloud container node-pools create larger-pool \
+  --cluster devops-portfolio --zone us-central1-a \
+  --machine-type e2-small --num-nodes 1
+kubectl cordon <old-node-name>
+kubectl drain <old-node-name> --ignore-daemonsets --delete-emptydir-data
+gcloud container node-pools delete default-pool \
+  --cluster devops-portfolio --zone us-central1-a
+```
+
+**Node capacity, round two.** As ArgoCD, Argo Rollouts, kube-prometheus-stack,
+and the application accumulated on a single `e2-small` node, memory
+requests climbed to 97% and CPU to 79%. This manifested as
+`kubectl port-forward` failing with `error dialing backend: No agent available` — the `konnectivity-agent` (GKE's control-plane↔node tunnel)
+was in `CrashLoopBackOff`, and even `kubectl logs` on it failed, since
+fetching logs depends on the same broken tunnel. Diagnosed via direct node
+SSH + `crictl` (bypassing the API server tunnel entirely), which surfaced
+the real cause: `containerd` itself was timing out on CRI calls
+(`DeadlineExceeded`) under resource pressure. Resolved by upgrading to
+`e2-medium` and, when that still saturated CPU under the combined
+workload, resizing the pool to 2 nodes:
+
+```bash
+gcloud container clusters resize devops-portfolio \
+  --node-pool medium-pool --num-nodes 2 --zone us-central1-a
+```
+
+**AnalysisTemplate type mismatch aborted the first real rollout.** The
+first live canary run failed with
+`invalid operation: >= (mismatched types []float64 and float64)` and Argo
+Rollouts correctly aborted the rollout, returning all traffic to stable
+with zero user-facing impact. Root cause: Argo Rollouts' Prometheus
+provider can parse an instant-vector result as `[]float64` even with a
+single series, which then fails type comparison against a scalar
+`successCondition`. Fixed by wrapping both PromQL queries in `scalar(...)`.
+
+**`retry` does not re-resolve an updated AnalysisTemplate.** After fixing
+the template, retrying the same rollout (`kubectl argo rollouts retry`)
+reproduced the identical, pre-fix error three times in a row. Argo
+Rollouts resolves and freezes the AnalysisTemplate content the first time
+a canary step's analysis phase starts; `retry` replays that frozen copy
+rather than re-reading the template. The fix only took effect once a new
+revision was shipped (a fresh code change, committed and pushed), which
+triggered a new analysis resolution — confirmed by `Successful` with 6/6
+measurements passing.
+
+**Trivy found a real, fixable CVE.** With `ignore-unfixed: true` filtering
+out upstream-unfixed OS CVEs, one actionable finding remained:
+`CVE-2026-103111` in `libpcre2-8-0`, fixed upstream but not yet present in
+the base image. Fixed in the `Dockerfile` with
+`apt-get update && apt-get upgrade -y` at build time.
+
+## Known limitations
+
+- **SQLite + `emptyDir`**: not shared or persisted across pods/rollouts.
+  Acceptable for demonstrating the pipeline; a production setup would use
+  Cloud SQL or an equivalent managed database.
+- **Basic canary, no traffic-routing layer**: the cluster has no
+  Istio/NGINX Ingress, so Argo Rollouts approximates canary weighting via
+  replica ratio under a single Service rather than true weighted traffic
+  splitting.
+-
