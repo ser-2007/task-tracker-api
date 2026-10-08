@@ -1,0 +1,29 @@
+# Real alerting rule for Scenario 3's OOMKilled postmortem. Wired into the
+# same kube-prometheus-stack Alertmanager already running for Scenario 2's
+# canary analysis. The `release: kube-prometheus-stack` label is required --
+# the Prometheus Operator's default ruleSelector only picks up
+# PrometheusRule objects carrying that label (same pattern as the
+# ServiceMonitor in k8s/servicemonitor.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: task-tracker-api-memory-alerts
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: task-tracker-api.memory
+      rules:
+        - alert: ContainerMemoryNearLimit
+          expr: |
+            (
+              sum(container_memory_working_set_bytes{container!="", container!="POD"}) by (namespace, pod, container)
+              /
+              sum(kube_pod_container_resource_limits{resource="memory"}) by (namespace, pod, container)
+            ) > 0.85
+          for: 30s
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} is approaching its memory limit"
+            description: "Memory working set has been above 85% of the configured limit for 30s+. If this continues, the container is likely to be OOMKilled."
