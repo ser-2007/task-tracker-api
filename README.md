@@ -1,10 +1,14 @@
-
 # Task Tracker API — GitOps CI/CD with Canary Rollout
 
 A small Flask CRUD service deployed to GKE through a full GitOps pipeline:
 GitHub Actions builds and scans the image, ArgoCD syncs the manifests, and
 Argo Rollouts drives a metrics-gated canary release backed by live
 Prometheus queries scoped to the canary pods themselves.
+
+The same repository also hosts a second, fully isolated scenario: a
+real OOMKilled incident, deliberately reproduced, captured, and
+alerted on — see [Scenario 3: OOMKilled postmortem](#scenario-3-oomkilled-postmortem)
+below.
 
 ## Architecture
 
@@ -40,7 +44,10 @@ Dockerfile
 k8s/rollout.yaml                Argo Rollouts canary spec
 k8s/analysis-template.yaml      Prometheus-backed success-rate/latency gate
 k8s/servicemonitor.yaml         Prometheus scrape config
+k8s/oom-demo.yaml               Isolated Deployment for the OOMKilled scenario
+k8s/oom-demo-alerts.yaml        PrometheusRule: memory-pressure alert
 argocd/application.yaml         ArgoCD Application (automated sync)
+docs/oomkilled-postmortem.md    Scenario 3 postmortem, from real incident evidence
 ```
 
 ## Setup
@@ -55,16 +62,15 @@ kubectl get pods -n argo-rollouts
 ```
 
 The `analysistemplates.argoproj.io` CRD is large enough that a plain
-`kubectl apply` fails (`metadata.annotations: Too long: may not be more than 262144 bytes`, from the client-side `last-applied-configuration`
+`kubectl apply` fails (`metadata.annotations: Too long: may not be more
+than 262144 bytes`, from the client-side `last-applied-configuration`
 annotation). `--server-side` applies directly against the API server and
 avoids the limit.
 
 Install the CLI plugin (macOS, Homebrew):
-
 ```bash
 brew install argoproj/tap/kubectl-argo-rollouts
 ```
-
 A manually downloaded binary can mismatch the host architecture and fail
 with `exec format error`; Homebrew avoids that.
 
@@ -167,6 +173,37 @@ history.
 
 ---
 
+## Scenario 3: OOMKilled postmortem
+
+A separate, fully isolated workload (`k8s/oom-demo.yaml`) was used to
+reproduce a real memory leak against a tight container memory limit,
+capture the resulting OOMKilled event with full evidence, and add
+alerting that would have warned before the kill.
+
+**Isolation from Scenario 2.** This runs as a plain `Deployment`, not an
+Argo Rollouts `Rollout`, and shares nothing with the canary pipeline above
+beyond the same container image and the same ArgoCD `Application` (which
+syncs everything under `k8s/`). The leak behavior is a feature flag
+(`ENABLE_LEAK_ENDPOINT`) that defaults to `false` and is only ever enabled
+on this one manifest.
+
+**What happened.** Repeated calls to `POST /leak` grew the process's
+memory without bound until it exceeded the container's `64Mi` limit. The
+kernel OOM killer terminated the container (`Exit Code: 137`); Kubernetes
+restarted it automatically. The full timeline, exact timestamps, and the
+memory-growth curve from Prometheus are in the postmortem.
+
+**What was added as a result.** A `PrometheusRule` (`k8s/oom-demo-alerts.yaml`)
+that fires when a container's memory working set has been above 85% of its
+limit for 30 seconds or more — verified by reproducing the same leak
+behavior in a controlled, paced way and confirming the alert transitions
+to `Firing` before the container is killed.
+
+Full writeup, with the real pod events, the Prometheus memory graph, and
+the alert firing: **[docs/oomkilled-postmortem.md](docs/oomkilled-postmortem.md)**
+
+---
+
 ## Operational notes
 
 Real issues hit and resolved while building this out, kept here as a
@@ -188,7 +225,6 @@ also required a second resize once all of those were running together
 and the first upsize still left CPU requests at ~97% — confirmed via
 `kubectl describe node`'s Allocated Resources before resizing again. The
 node pool migration pattern used both times:
-
 ```bash
 gcloud container node-pools create <new-pool-name> \
   --cluster devops-portfolio --zone us-central1-a \
@@ -223,7 +259,8 @@ single series, which then fails type comparison against a scalar
 `successCondition`. Fixed by wrapping both PromQL queries in `scalar(...)`.
 
 **`retry` does not re-resolve an updated AnalysisTemplate.** After fixing
-the template above, retrying the same rollout (`kubectl argo rollouts retry`) reproduced the identical, pre-fix error three times in a row.
+the template above, retrying the same rollout (`kubectl argo rollouts
+retry`) reproduced the identical, pre-fix error three times in a row.
 Argo Rollouts resolves and freezes the AnalysisTemplate content the first
 time a canary step's analysis phase starts; `retry` replays that frozen
 copy rather than re-reading the template. The fix only took effect once a
@@ -241,7 +278,6 @@ canary pod's error rate badly enough that the aggregate stayed above the
 0.95 threshold, and the broken revision was wrongly promoted to stable.
 Fixed by passing the canary's pod-template-hash into the AnalysisTemplate
 as an argument and scoping both PromQL queries to the canary's own pods:
-
 ```yaml
 # k8s/rollout.yaml — analysis step
 - analysis:
@@ -252,7 +288,6 @@ as an argument and scoping both PromQL queries to the canary's own pods:
         valueFrom:
           podTemplateHashValue: Latest
 ```
-
 ```yaml
 # k8s/analysis-template.yaml — query, scoped via pod name
 query: |
@@ -262,7 +297,6 @@ query: |
     sum(rate(flask_http_request_duration_seconds_count{job="task-tracker-api", pod=~".*-{{args.canary-hash}}-.*"}[1m]))
   )
 ```
-
 After this fix, a clean revision was promoted to stable first (to recover
 from the wrongly-promoted broken one), and the same fault-injection test
 was repeated: the AnalysisRun now correctly measured the canary's own
