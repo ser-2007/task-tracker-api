@@ -52,7 +52,7 @@ jobs:
         run: docker build -t ${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.sha_tag }} .
 
       # Trivy fails the build on CRITICAL/HIGH CVEs — same gate used in the
-      # Scenario 2 pipeline design, kept here so a vulnerable image never
+      # pipeline design, kept here so a vulnerable image never
       # reaches the registry.
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
