@@ -4,6 +4,7 @@ deploy target for the GitOps/canary pipeline (Scenario 2). It is intentionally
 real: a SQLite-backed CRUD service with its own business logic, not a
 hello-world placeholder, so canary comparisons (v1 vs v2) are meaningful.
 """
+import hashlib
 import os
 import random
 import sqlite3
@@ -25,6 +26,39 @@ FAULT_RATE = float(os.environ.get("FAULT_RATE", "0"))
 # Never enabled on the main canary Rollout.
 LEAK_ENABLED = os.environ.get("ENABLE_LEAK_ENDPOINT", "false").lower() == "true"
 _leak_store = []
+
+# Secret Manager demo, off by default. Used once, deliberately, on a
+# separate Deployment (k8s/secrets-demo-deployment.yaml) bound to a
+# dedicated Kubernetes ServiceAccount via Workload Identity -- no static
+# GCP key file anywhere in the image or the cluster. See
+# docs/secret-manager-workload-identity.md.
+SECRETS_DEMO_ENABLED = os.environ.get("SECRETS_DEMO_ENABLED", "false").lower() == "true"
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
+GCP_SECRET_NAME = os.environ.get("GCP_SECRET_NAME", "task-tracker-db-password")
+_secret_cache = {"fetched": False, "fingerprint": None, "version": None, "error": None}
+
+
+def _fetch_secret_status():
+    # Fetched lazily, once, and cached for the life of the process -- not
+    # re-fetched on every request. The secret's VALUE is never stored,
+    # logged, or returned: only a short SHA-256 fingerprint, which proves a
+    # real value was retrieved without exposing it.
+    if _secret_cache["fetched"]:
+        return _secret_cache
+    try:
+        from google.cloud import secretmanager
+
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{GCP_PROJECT_ID}/secrets/{GCP_SECRET_NAME}/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        value = response.payload.data.decode("utf-8")
+        _secret_cache["fingerprint"] = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        _secret_cache["version"] = response.name.rsplit("/", 1)[-1]
+        _secret_cache["error"] = None
+    except Exception as exc:  # noqa: BLE001 -- surfaced in /secret-status, not raised
+        _secret_cache["error"] = str(exc)
+    _secret_cache["fetched"] = True
+    return _secret_cache
 
 app = Flask(__name__)
 
@@ -91,6 +125,24 @@ def leak():
     return jsonify(
         leaked_chunks=len(_leak_store),
         approx_leaked_mb=len(_leak_store) * chunk_mb,
+    ), 200
+
+
+@app.route("/secret-status")
+def secret_status():
+    # Deliberately never returns the secret value -- only whether a real
+    # value was retrieved from Secret Manager, its version, and a
+    # fingerprint that proves retrieval without exposing the content.
+    if not SECRETS_DEMO_ENABLED:
+        abort(404)
+    status = _fetch_secret_status()
+    return jsonify(
+        secret_source="gcp-secret-manager",
+        secret_name=GCP_SECRET_NAME,
+        loaded=status["error"] is None,
+        version=status["version"],
+        fingerprint=status["fingerprint"],
+        error=status["error"],
     ), 200
 
 

@@ -76,3 +76,8 @@ def test_get_missing_task_returns_404(client):
 def test_leak_endpoint_disabled_by_default(client):
     resp = client.post("/leak")
     assert resp.status_code == 404
+
+
+def test_secret_status_disabled_by_default(client):
+    resp = client.get("/secret-status")
+    assert resp.status_code == 404
