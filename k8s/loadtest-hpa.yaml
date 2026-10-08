@@ -1,0 +1,27 @@
+# HorizontalPodAutoscaler for Scenario 4. Scales task-tracker-api-loadtest
+# on average CPU utilization. Requires the metrics-server (or GKE's
+# built-in equivalent) to be serving pod CPU metrics -- verify with
+# `kubectl top pods` before relying on this.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-tracker-api-loadtest
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-tracker-api-loadtest
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleDown:
+      # Slow the scale-down so the replica count is still observable for a
+      # minute or two after load stops, instead of collapsing immediately.
+      stabilizationWindowSeconds: 60
