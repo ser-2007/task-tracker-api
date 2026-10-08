@@ -8,6 +8,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: task-tracker-api-memory-alerts
+  namespace: monitoring
   labels:
     release: kube-prometheus-stack
 spec:
