@@ -5,10 +5,11 @@ GitHub Actions builds and scans the image, ArgoCD syncs the manifests, and
 Argo Rollouts drives a metrics-gated canary release backed by live
 Prometheus queries scoped to the canary pods themselves.
 
-The same repository also hosts a second, fully isolated scenario: a
-real OOMKilled incident, deliberately reproduced, captured, and
-alerted on — see [Scenario 3: OOMKilled postmortem](#scenario-3-oomkilled-postmortem)
-below.
+The same repository also hosts two further, fully isolated scenarios: a
+real OOMKilled incident, deliberately reproduced, captured, and alerted on
+(see [Scenario 3](#scenario-3-oomkilled-postmortem) below), and a real
+horizontal autoscaling load test (see [Scenario 4](#scenario-4-horizontal-pod-autoscaling-load-test)
+below).
 
 ## Architecture
 
