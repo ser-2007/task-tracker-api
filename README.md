@@ -5,10 +5,12 @@ GitHub Actions builds and scans the image, ArgoCD syncs the manifests, and
 Argo Rollouts drives a metrics-gated canary release backed by live
 Prometheus queries scoped to the canary pods themselves.
 
-The same repository also hosts two further, fully isolated scenarios: a
+The same repository also hosts three further, fully isolated scenarios: a
 real OOMKilled incident, deliberately reproduced, captured, and alerted on
-(see [Scenario 3](#scenario-3-oomkilled-postmortem) below), and a real
+(see [Scenario 3](#scenario-3-oomkilled-postmortem) below); a real
 horizontal autoscaling load test (see [Scenario 4](#scenario-4-horizontal-pod-autoscaling-load-test)
+below); and a GCP Secret Manager integration via Workload Identity, with
+no static key file anywhere (see [Scenario 5](#scenario-5-secret-manager--workload-identity)
 below).
 
 ## Architecture
@@ -47,8 +49,14 @@ k8s/analysis-template.yaml      Prometheus-backed success-rate/latency gate
 k8s/servicemonitor.yaml         Prometheus scrape config
 k8s/oom-demo.yaml               Isolated Deployment for the OOMKilled scenario
 k8s/oom-demo-alerts.yaml        PrometheusRule: memory-pressure alert
+k8s/loadtest-deployment.yaml    Isolated Deployment for the autoscaling scenario
+k8s/loadtest-hpa.yaml           HorizontalPodAutoscaler (CPU-based)
+k8s/secrets-demo-serviceaccount.yaml  Workload Identity-bound ServiceAccount
+k8s/secrets-demo-deployment.yaml      Isolated Deployment for the secrets scenario
 argocd/application.yaml         ArgoCD Application (automated sync)
 docs/oomkilled-postmortem.md    Scenario 3 postmortem, from real incident evidence
+docs/autoscaling-load-test.md   Scenario 4 writeup, from a real load test
+docs/secret-manager-workload-identity.md  Scenario 5 writeup
 ```
 
 ## Setup
@@ -202,6 +210,64 @@ to `Firing` before the container is killed.
 
 Full writeup, with the real pod events, the Prometheus memory graph, and
 the alert firing: **[docs/oomkilled-postmortem.md](docs/oomkilled-postmortem.md)**
+
+---
+
+## Scenario 4: Horizontal Pod Autoscaling load test
+
+A third isolated workload (`k8s/loadtest-deployment.yaml`) carries a
+CPU-based `HorizontalPodAutoscaler` (`k8s/loadtest-hpa.yaml`), exercised
+with a real concurrent load test rather than a synthetic CPU-burn script.
+
+**Why this workload scales horizontally, not just by CPU limit.** Flask's
+built-in development server handles one request at a time per process, so
+under concurrent load a single pod saturates its CPU limit long before it
+can serve requests any faster. More replicas, not a bigger limit, is what
+increases throughput — a realistic case for horizontal scaling rather
+than a contrived one.
+
+**What was measured.** 50 concurrent connections against `/tasks` for 3
+minutes (`hey -z 3m -c 50 ...`). The `HorizontalPodAutoscaler` scaled the
+deployment from 1 to its configured maximum of 5 replicas within seconds
+of the target CPU utilization (50%) being exceeded, held there while load
+continued, and scaled back down to 1 after a 60-second stabilization
+window once the load test ended — all with no manual intervention.
+
+Full writeup, with the real `kubectl get hpa -w` output, pod scaling
+events, and the Prometheus CPU graph:
+**[docs/autoscaling-load-test.md](docs/autoscaling-load-test.md)**
+
+---
+
+## Scenario 5: Secret Manager + Workload Identity
+
+A fourth isolated workload (`k8s/secrets-demo-deployment.yaml`) retrieves
+a secret from Google Cloud Secret Manager at runtime using GKE Workload
+Identity — no static GCP key file anywhere in the image, the cluster, or
+the repository.
+
+**How the identity chain works.** A Kubernetes `ServiceAccount`
+(`k8s/secrets-demo-serviceaccount.yaml`) is annotated with a dedicated GCP
+service account, which in turn is scoped by IAM to read exactly one
+secret and nothing else. The binding between the two is itself scoped to
+one namespace/ServiceAccount pair, so no other workload in the cluster
+can assume this identity. The pod authenticates by *being* that
+ServiceAccount; GKE's metadata server handles the credential exchange
+transparently.
+
+**What was verified.** A feature-flagged endpoint (`/secret-status`,
+disabled everywhere else) fetches the secret once and returns only
+whether it loaded, its version, and a SHA-256 fingerprint — never the
+value itself:
+
+```json
+{"error":null,"fingerprint":"6bbde1e07fd5","loaded":true,"secret_name":"task-tracker-db-password","secret_source":"gcp-secret-manager","version":"1"}
+```
+
+Full writeup, including why Workload Identity was chosen over a key
+file, the exact `gcloud` provisioning commands, and the IAM scoping that
+limits blast radius to one secret:
+**[docs/secret-manager-workload-identity.md](docs/secret-manager-workload-identity.md)**
 
 ---
 
